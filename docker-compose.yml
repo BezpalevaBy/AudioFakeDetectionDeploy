@@ -1,0 +1,10 @@
+version: "3.9"
+services:
+  detector:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app  # Для разработки с hot-reload
+    environment:
+      - PYTHONPATH=/app
