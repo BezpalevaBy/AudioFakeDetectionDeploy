@@ -9,8 +9,13 @@ from datetime import datetime
 from .audio import AudioProcessor
 from .model import DEVICE
 from .analysis import analyze_artifacts, generate_spectrogram_data
+import librosa
+from transformers import AutoModelForAudioClassification, AutoFeatureExtractor
 
 logger = logging.getLogger(__name__)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model_name = "garystafford/wav2vec2-deepfake-voice-detector"
+feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
 
 
 class AudioInference:
@@ -24,7 +29,6 @@ class AudioInference:
         """
         self.model = model
         self.target_length = target_length
-        self.model.eval()
 
         # Статистика работы
         self.total_inferences = 0
@@ -57,30 +61,24 @@ class AudioInference:
             if not is_valid:
                 return {"error": error_msg, "processing_time": time.time() - start_time}
 
-            # Загрузка аудио
-            audio, sr = AudioProcessor.load_audio(audio_path, normalize=True)
+            audio, sr = librosa.load(audio_path, sr=16000, mono=True)
+            inputs = feature_extractor(
+                audio, sampling_rate=16000, return_tensors="pt", padding=True
+            )
+            inputs = {k: v.to(device) for k, v in inputs.items()}
 
-            # Анализ качества аудио
             quality_metrics = AudioProcessor.analyze_audio_quality(audio, sr)
 
-            # Предобработка для модели
-            processed_audio = AudioProcessor.preprocess_for_model(
-                audio, sr, target_length=self.target_length
-            )
-
-            # Конвертация в тензор
-            tensor = torch.tensor(processed_audio, dtype=torch.float32)
-            tensor = tensor.unsqueeze(0).unsqueeze(0).to(DEVICE)
-
-            # Выполнение предсказания
             with torch.no_grad():
-                logits = self.model(tensor)  # [B,1] → сигмоида внутри модели
-                fake_prob = logits[0, 0].item()  # вероятность фейка
-                real_prob = 1.0 - fake_prob
-                is_fake = fake_prob > 0.5
-                confidence = fake_prob if is_fake else real_prob
+                outputs = self.model(**inputs)
+                logits = outputs.logits
+                probs = torch.nn.functional.softmax(logits, dim=-1)
 
-            # Определение метки
+            # Get prediction
+            real_prob = probs[0][0].item()
+            fake_prob = probs[0][1].item()
+            is_fake = fake_prob > 0.5
+            confidence = fake_prob if is_fake else real_prob
             label = "FAKE" if is_fake else "REAL"
 
             # Детальный анализ артефактов

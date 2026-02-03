@@ -1,6 +1,5 @@
 fastapi
 uvicorn
-torch
 torchaudio
 librosa
 numpy
@@ -16,3 +15,7 @@ psutil
 ipython
 pytest
 black
+transformers
+torch
+torchvision
+torchaudio

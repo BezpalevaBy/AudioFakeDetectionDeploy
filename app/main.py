@@ -4,24 +4,23 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi import UploadFile, BackgroundTasks
+from fastapi import UploadFile
 import os
 import asyncio
 from contextlib import asynccontextmanager
 import logging
-from datetime import datetime
 import torch
 from app.api.routes import router
 from app.api.streaming import audio_stream
 from app.core.model import load_model
 from app.core.metrics import SystemMetrics
 from app.core.inference import AudioInference
-from fastapi import WebSocket
-import json
 import base64
 import asyncio
 import time
 from datetime import datetime
+from transformers import AutoModelForAudioClassification, AutoFeatureExtractor
+import librosa
 
 # Настройка логирования
 logging.basicConfig(
@@ -33,8 +32,10 @@ logger = logging.getLogger(__name__)
 _model = None
 _metrics = None
 
-model_path = os.getenv("MODEL_PATH", "models/rawnet_lite.pt")
-model = load_model(model_path)
+model_name = "garystafford/wav2vec2-deepfake-voice-detector"
+model = AutoModelForAudioClassification.from_pretrained(model_name)
+feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
+
 inference = AudioInference(model)
 
 
@@ -66,9 +67,7 @@ def get_model():
     global _model
     if _model is None:
         try:
-            model_path = os.getenv("MODEL_PATH", "models/rawnet_lite.pt")
-            logger.info(f"Loading model from {model_path}")
-            _model = load_model(model_path)
+            _model = load_model()
             logger.info(
                 f"Model loaded successfully on device: {next(_model.parameters()).device}"
             )
