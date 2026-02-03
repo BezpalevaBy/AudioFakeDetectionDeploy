@@ -53,40 +53,66 @@ class AudioInference:
         start_time = time.time()
 
         try:
-            # Загрузка и предобработка аудио
             logger.info(f"Начинаем обработку файла: {audio_path}")
 
-            # Валидация аудио
             is_valid, error_msg = AudioProcessor.validate_audio(audio_path)
             if not is_valid:
                 return {"error": error_msg, "processing_time": time.time() - start_time}
 
-            audio, sr = librosa.load(audio_path, sr=16000, mono=True)
-            inputs = feature_extractor(
-                audio, sampling_rate=16000, return_tensors="pt", padding=True
-            )
-            inputs = {k: v.to(device) for k, v in inputs.items()}
+            MAX_CHUNK_SEC = 13
+            SAMPLE_RATE = 16000
+            CHUNK_SAMPLES = MAX_CHUNK_SEC * SAMPLE_RATE
 
-            quality_metrics = AudioProcessor.analyze_audio_quality(audio, sr)
+            audio, sr = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)
 
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-                logits = outputs.logits
-                probs = torch.nn.functional.softmax(logits, dim=-1)
+            chunks = []
+            total_len = len(audio)
 
-            # Get prediction
-            real_prob = probs[0][0].item()
-            fake_prob = probs[0][1].item()
+            for start in range(0, total_len, CHUNK_SAMPLES):
+                end = min(start + CHUNK_SAMPLES, total_len)
+                chunk = audio[start:end]
+                if len(chunk) > 0:
+                    chunks.append(chunk)
+
+            real_probs = []
+            fake_probs = []
+            quality_metrics_list = []
+
+            for chunk in chunks:
+                inputs = feature_extractor(
+                    chunk, sampling_rate=SAMPLE_RATE, return_tensors="pt", padding=True
+                )
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+
+                qm = AudioProcessor.analyze_audio_quality(chunk, sr)
+                quality_metrics_list.append(qm)
+
+                with torch.no_grad():
+                    outputs = self.model(**inputs)
+                    logits = outputs.logits
+                    probs = torch.nn.functional.softmax(logits, dim=-1)
+
+                real_probs.append(probs[0][0].item())
+                fake_probs.append(probs[0][1].item())
+
+            real_prob = float(np.mean(real_probs))
+            fake_prob = float(np.mean(fake_probs))
+
             is_fake = fake_prob > 0.5
             confidence = fake_prob if is_fake else real_prob
             label = "FAKE" if is_fake else "REAL"
 
-            # Детальный анализ артефактов
+            quality_metrics = {}
+            if quality_metrics_list:
+                for key in quality_metrics_list[0].keys():
+                    quality_metrics[key] = float(
+                        np.mean([qm[key] for qm in quality_metrics_list])
+                    )
+
             analysis = None
             if return_analysis:
                 analysis = analyze_artifacts(fake_prob, audio, sr)
 
-            # Генерация данных спектрограммы
             spectrogram_data = None
             if spectrogram_id != 0:
                 spectrogram_data = generate_spectrogram_data(audio, sr, spectrogram_id)
