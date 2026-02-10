@@ -20,7 +20,7 @@ import asyncio
 import time
 from datetime import datetime
 from transformers import AutoModelForAudioClassification, AutoFeatureExtractor
-import librosa
+from .model import aasist3
 
 # Настройка логирования
 logging.basicConfig(
@@ -32,9 +32,8 @@ logger = logging.getLogger(__name__)
 _model = None
 _metrics = None
 
-model_name = "garystafford/wav2vec2-deepfake-voice-detector"
-model = AutoModelForAudioClassification.from_pretrained(model_name)
-feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
+model_name = "MTUCI/AASIST3"
+model = aasist3.from_pretrained(model_name)
 
 inference = AudioInference(model)
 
