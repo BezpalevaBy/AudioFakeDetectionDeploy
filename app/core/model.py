@@ -3,6 +3,8 @@ import torch
 import logging
 from typing import Dict, Any
 from transformers import AutoModelForAudioClassification
+from app.model import spectra_0
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -10,11 +12,18 @@ logger.info(f"Using device: {DEVICE}")
 
 
 def load_model():
-    model_name = "garystafford/wav2vec2-deepfake-voice-detector"
-    model = AutoModelForAudioClassification.from_pretrained(model_name)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    MODEL_DIR = Path(__file__).parent.parent
+
+    print(f"Загружаем модель из: {MODEL_DIR}")
+    print(f"Файл safetensors: {MODEL_DIR / 'model.safetensors'}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
+    model = (
+        spectra_0.from_pretrained(pretrained_model_name_or_path=str(MODEL_DIR))
+        .eval()
+        .to(device)
+    )
     model.eval()
 
     return model

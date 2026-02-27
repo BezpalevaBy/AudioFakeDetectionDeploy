@@ -1,43 +1,165 @@
 # app/core/inference.py
 import torch
 import numpy as np
-from typing import Tuple, Dict, Optional
+from typing import Dict, Optional, List, Tuple
 import logging
 import time
 from datetime import datetime
+import random
+import torchaudio
+import soundfile as sf
+import uuid
+import os
+import tempfile
+import io
 
 from .audio import AudioProcessor
-from .model import DEVICE
 from .analysis import analyze_artifacts, generate_spectrogram_data
-import librosa
-from transformers import AutoModelForAudioClassification, AutoFeatureExtractor
 
 logger = logging.getLogger(__name__)
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model_name = "garystafford/wav2vec2-deepfake-voice-detector"
-feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
+
+# Константы для модели spectra_0
+SAMPLE_RATE = 16000
+TARGET_LENGTH = 64600  # фиксированная длина для модели
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+THRESHOLD = -1.0625009  # оптимальный порог из модели
+
+
+def pad_random(x: torch.Tensor, max_len: int = TARGET_LENGTH) -> torch.Tensor:
+    """
+    Обрезка или повторение аудио до целевой длины
+
+    Args:
+        x: Входной тензор аудио
+        max_len: Целевая длина
+
+    Returns:
+        torch.Tensor: Аудио фиксированной длины
+    """
+    if x.ndim > 1:
+        x = x.squeeze()
+    x_len = x.shape[0]
+
+    if x_len >= max_len:
+        # Если аудио длиннее, берем случайный отрезок
+        start = random.randint(0, x_len - max_len)
+        return x[start : start + max_len]
+    else:
+        # Если короче, повторяем
+        num_repeats = int(max_len / x_len) + 1
+        return x.repeat(num_repeats)[:max_len]
+
+
+def load_audio_mono(path: str) -> torch.Tensor:
+    """
+    Загрузка аудио в моно с частотой 16kHz
+
+    Args:
+        path: Путь к аудиофайлу
+
+    Returns:
+        torch.Tensor: Аудио тензор
+    """
+    audio, sr = sf.read(path, dtype="float32")
+    audio = torch.from_numpy(audio)
+
+    if audio.ndim > 1:
+        # (num_samples, channels) -> mono
+        audio = audio.mean(dim=1)
+
+    if sr != SAMPLE_RATE:
+        audio = torchaudio.functional.resample(audio, sr, SAMPLE_RATE)
+
+    return audio
 
 
 class AudioInference:
-    """Класс для выполнения предсказаний на аудио"""
+    """
+    Класс для выполнения предсказаний на аудио с использованием модели spectra_0
+    """
 
-    def __init__(self, model, target_length: int = 64600):
+    def __init__(self, model, target_length: int = TARGET_LENGTH):
         """
+        Инициализация инференса
+
         Args:
-            model: Загруженная модель
+            model: Загруженная модель spectra_0
             target_length: Целевая длина аудио для модели
         """
         self.model = model
         self.target_length = target_length
+        self.device = DEVICE
+        self.threshold = THRESHOLD
+
+        # Перемещаем модель на устройство если нужно
+        self.model = self.model.to(self.device)
+        self.model.eval()
 
         # Статистика работы
         self.total_inferences = 0
         self.total_processing_time = 0.0
 
-    import uuid
+        logger.info(f"AudioInference initialized on {self.device}")
+        logger.info(f"Target length: {target_length}, Threshold: {self.threshold}")
 
-    def predict(
-        self, audio_path: str, return_analysis: bool = True, spectrogram_id: uuid = 0
+    def preprocess_audio(self, audio_path: str) -> torch.Tensor:
+        """
+        Полная предобработка аудио для модели
+
+        Args:
+            audio_path: Путь к аудиофайлу
+
+        Returns:
+            torch.Tensor: Подготовленный тензор для модели
+        """
+        # Загрузка аудио
+        audio = load_audio_mono(audio_path)
+
+        # Preemphasis фильтр (как в примере модели)
+        audio = torchaudio.functional.preemphasis(audio.unsqueeze(0))  # (1, T)
+
+        # Обрезка/повтор до нужной длины
+        audio = pad_random(audio.squeeze(0), self.target_length).unsqueeze(
+            0
+        )  # (1, target_length)
+
+        return audio.to(self.device)
+
+    def preprocess_bytes(self, audio_bytes: bytes) -> torch.Tensor:
+        """
+        Предобработка аудио из байтов
+
+        Args:
+            audio_bytes: Байты аудиофайла
+
+        Returns:
+            torch.Tensor: Подготовленный тензор для модели
+        """
+        # Чтение из байтов
+        with io.BytesIO(audio_bytes) as f:
+            audio, sr = sf.read(f, dtype="float32")
+
+        audio = torch.from_numpy(audio)
+
+        if audio.ndim > 1:
+            audio = audio.mean(dim=1)
+
+        if sr != SAMPLE_RATE:
+            audio = torchaudio.functional.resample(audio, sr, SAMPLE_RATE)
+
+        # Preemphasis
+        audio = torchaudio.functional.preemphasis(audio.unsqueeze(0))
+
+        # Обрезка/повтор
+        audio = pad_random(audio.squeeze(0), self.target_length).unsqueeze(0)
+
+        return audio.to(self.device)
+
+    def predict_from_file(
+        self,
+        audio_path: str,
+        return_analysis: bool = True,
+        spectrogram_id: Optional[uuid.UUID] = None,
     ) -> Dict:
         """
         Выполнение предсказания для аудиофайла
@@ -45,7 +167,7 @@ class AudioInference:
         Args:
             audio_path: Путь к аудиофайлу
             return_analysis: Возвращать детальный анализ
-            generate_spectrogram: Генерировать данные спектрограммы
+            spectrogram_id: ID для спектрограммы
 
         Returns:
             Dict: Результаты предсказания
@@ -55,67 +177,63 @@ class AudioInference:
         try:
             logger.info(f"Начинаем обработку файла: {audio_path}")
 
+            # Валидация аудио
             is_valid, error_msg = AudioProcessor.validate_audio(audio_path)
             if not is_valid:
                 return {"error": error_msg, "processing_time": time.time() - start_time}
 
-            MAX_CHUNK_SEC = 13
-            SAMPLE_RATE = 16000
-            CHUNK_SAMPLES = MAX_CHUNK_SEC * SAMPLE_RATE
+            # Предобработка аудио
+            audio_tensor = self.preprocess_audio(audio_path)
 
-            audio, sr = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)
+            # Получаем оригинальное аудио для анализа качества
+            audio_np, sr = sf.read(audio_path, dtype="float32")
+            if len(audio_np.shape) > 1:
+                audio_np = audio_np.mean(axis=1)
 
-            chunks = []
-            total_len = len(audio)
+            # Инференс
+            with torch.inference_mode():
+                logits = self.model(audio_tensor)  # (1, 2)
 
-            for start in range(0, total_len, CHUNK_SAMPLES):
-                end = min(start + CHUNK_SAMPLES, total_len)
-                chunk = audio[start:end]
-                if len(chunk) > 0:
-                    chunks.append(chunk)
+                # Индекс 0 = spoof, индекс 1 = bonafide
+                score_spoof = logits[0, 0].item()
+                score_bonafide = logits[0, 1].item()
 
-            real_probs = []
-            fake_probs = []
-            quality_metrics_list = []
+            # Классификация на основе порога
+            is_bonafide = score_bonafide > self.threshold
+            is_fake = not is_bonafide
 
-            for chunk in chunks:
-                inputs = feature_extractor(
-                    chunk, sampling_rate=SAMPLE_RATE, return_tensors="pt", padding=True
-                )
-                inputs = {k: v.to(device) for k, v in inputs.items()}
+            # Вычисление уверенности (нормализованная разница логарифмов)
+            confidence = abs(score_bonafide - score_spoof) / 10.0
+            confidence = min(1.0, max(0.0, confidence))  # ограничиваем [0, 1]
 
-                qm = AudioProcessor.analyze_audio_quality(chunk, sr)
-                quality_metrics_list.append(qm)
+            label = "REAL" if is_bonafide else "FAKE"
 
-                with torch.no_grad():
-                    outputs = self.model(**inputs)
-                    logits = outputs.logits
-                    probs = torch.nn.functional.softmax(logits, dim=-1)
+            # Вероятности через сигмоиду
+            prob_real = 1.0 / (1.0 + np.exp(-score_bonafide))
+            prob_fake = 1.0 / (1.0 + np.exp(-score_spoof))
+            # Нормализация
+            total = prob_real + prob_fake
+            prob_real /= total
+            prob_fake /= total
 
-                real_probs.append(probs[0][0].item())
-                fake_probs.append(probs[0][1].item())
-
-            real_prob = float(np.mean(real_probs))
-            fake_prob = float(np.mean(fake_probs))
-
-            is_fake = fake_prob > 0.5
-            confidence = fake_prob if is_fake else real_prob
-            label = "FAKE" if is_fake else "REAL"
-
+            # Анализ качества аудио
             quality_metrics = {}
-            if quality_metrics_list:
-                for key in quality_metrics_list[0].keys():
-                    quality_metrics[key] = float(
-                        np.mean([qm[key] for qm in quality_metrics_list])
-                    )
+            if return_analysis:
+                quality_metrics = AudioProcessor.analyze_audio_quality(
+                    audio_np, sr if "sr" in locals() else SAMPLE_RATE
+                )
 
+            # Детальный анализ артефактов
             analysis = None
             if return_analysis:
-                analysis = analyze_artifacts(fake_prob, audio, sr)
+                analysis = analyze_artifacts(prob_fake, audio_np, sr)
 
+            # Спектрограмма
             spectrogram_data = None
-            if spectrogram_id != 0:
-                spectrogram_data = generate_spectrogram_data(audio, sr, spectrogram_id)
+            if spectrogram_id:
+                spectrogram_data = generate_spectrogram_data(
+                    audio_np, sr, spectrogram_id
+                )
 
             processing_time = time.time() - start_time
 
@@ -128,18 +246,25 @@ class AudioInference:
                 "classification": label,
                 "is_fake": is_fake,
                 "confidence": confidence,
-                "probabilities": {"real": float(real_prob), "fake": float(fake_prob)},
+                "scores": {
+                    "bonafide": score_bonafide,
+                    "spoof": score_spoof,
+                    "threshold_used": self.threshold,
+                },
+                "probabilities": {"real": float(prob_real), "fake": float(prob_fake)},
                 "processing_time": processing_time,
                 "audio_quality": quality_metrics,
                 "audio_info": {
-                    "duration_seconds": len(audio) / sr,
-                    "sample_rate": sr,
+                    "duration_seconds": float(len(audio_np) / SAMPLE_RATE),
+                    "sample_rate": SAMPLE_RATE,
+                    "input_length": self.target_length,
                     "original_path": audio_path,
                 },
                 "model_info": {
                     "name": self.model.__class__.__name__,
-                    "device": str(DEVICE),
+                    "device": str(self.device),
                     "target_length": self.target_length,
+                    "threshold": self.threshold,
                 },
                 "timestamp": datetime.now().isoformat(),
                 "inference_id": f"inf_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.total_inferences}",
@@ -148,11 +273,12 @@ class AudioInference:
             if analysis:
                 result["analysis"] = analysis
 
-            if spectrogram_data != 0:
+            if spectrogram_data:
                 result["spectrogram"] = spectrogram_data
 
             logger.info(
-                f"Обработка завершена: {label} с уверенностью {confidence:.2%}, время: {processing_time:.2f}с"
+                f"Обработка завершена: {label} с уверенностью {confidence:.2%}, "
+                f"время: {processing_time:.2f}с"
             )
 
             return result
@@ -167,13 +293,92 @@ class AudioInference:
                 "timestamp": datetime.now().isoformat(),
             }
 
-    def predict_batch(self, audio_paths: list, batch_size: int = 8) -> Dict:
+    def predict_from_bytes(
+        self,
+        audio_bytes: bytes,
+        filename: str = "audio.wav",
+        return_analysis: bool = False,
+    ) -> Dict:
+        """
+        Предсказание из байтов аудио
+
+        Args:
+            audio_bytes: Байты аудиофайла
+            filename: Имя файла (для логирования)
+            return_analysis: Возвращать детальный анализ
+
+        Returns:
+            Dict: Результаты предсказания
+        """
+        start_time = time.time()
+
+        try:
+            # Предобработка байтов
+            audio_tensor = self.preprocess_bytes(audio_bytes)
+
+            # Инференс
+            with torch.inference_mode():
+                logits = self.model(audio_tensor)
+                score_spoof = logits[0, 0].item()
+                score_bonafide = logits[0, 1].item()
+
+            # Классификация
+            is_bonafide = score_bonafide > self.threshold
+            is_fake = not is_bonafide
+            confidence = abs(score_bonafide - score_spoof) / 10.0
+            confidence = min(1.0, max(0.0, confidence))
+            label = "REAL" if is_bonafide else "FAKE"
+
+            # Вероятности
+            prob_real = 1.0 / (1.0 + np.exp(-score_bonafide))
+            prob_fake = 1.0 / (1.0 + np.exp(-score_spoof))
+            total = prob_real + prob_fake
+            prob_real /= total
+            prob_fake /= total
+
+            processing_time = time.time() - start_time
+
+            self.total_inferences += 1
+            self.total_processing_time += processing_time
+
+            result = {
+                "classification": label,
+                "is_fake": is_fake,
+                "confidence": confidence,
+                "scores": {"bonafide": score_bonafide, "spoof": score_spoof},
+                "probabilities": {"real": float(prob_real), "fake": float(prob_fake)},
+                "processing_time": processing_time,
+                "filename": filename,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Ошибка при обработке байтов: {str(e)}")
+            return {
+                "error": str(e),
+                "processing_time": time.time() - start_time,
+            }
+
+    def predict(
+        self,
+        audio_path: str,
+        return_analysis: bool = True,
+        spectrogram_id: Optional[uuid.UUID] = None,
+    ) -> Dict:
+        """
+        Алиас для predict_from_file (для обратной совместимости)
+        """
+        return self.predict_from_file(audio_path, return_analysis, spectrogram_id)
+
+    def predict_batch(self, audio_paths: List[str], batch_size: int = 8) -> Dict:
         """
         Пакетная обработка аудиофайлов
 
         Args:
             audio_paths: Список путей к аудиофайлам
-            batch_size: Размер батча
+            batch_size: Размер батча (не используется, т.к. модель не поддерживает батчи)
 
         Returns:
             Dict: Результаты пакетной обработки
@@ -184,25 +389,14 @@ class AudioInference:
 
         logger.info(f"Начало пакетной обработки {len(audio_paths)} файлов")
 
-        # Обработка файлов батчами
-        for i in range(0, len(audio_paths), batch_size):
-            batch = audio_paths[i : i + batch_size]
-            batch_start = time.time()
-
-            logger.info(
-                f"Обработка батча {i//batch_size + 1}/{(len(audio_paths)-1)//batch_size + 1}"
-            )
-
-            for audio_path in batch:
-                try:
-                    result = self.predict(audio_path, return_analysis=True)
-                    results.append(result)
-                except Exception as e:
-                    logger.error(f"Ошибка при обработке файла {audio_path}: {str(e)}")
-                    failed_files.append({"path": audio_path, "error": str(e)})
-
-            batch_time = time.time() - batch_start
-            logger.info(f"Батч обработан за {batch_time:.2f}с")
+        for i, audio_path in enumerate(audio_paths):
+            try:
+                logger.info(f"Обработка файла {i+1}/{len(audio_paths)}: {audio_path}")
+                result = self.predict_from_file(audio_path, return_analysis=False)
+                results.append(result)
+            except Exception as e:
+                logger.error(f"Ошибка при обработке файла {audio_path}: {str(e)}")
+                failed_files.append({"path": audio_path, "error": str(e)})
 
         total_time = time.time() - start_time
 
@@ -232,37 +426,13 @@ class AudioInference:
             "timestamp": datetime.now().isoformat(),
         }
 
-    def predict_from_bytes(
-        self, audio_bytes: bytes, filename: str = "audio.wav"
-    ) -> Dict:
+    def get_stats(self) -> Dict:
         """
-        Предсказание из байтов аудио
-
-        Args:
-            audio_bytes: Байты аудиофайла
-            filename: Имя файла (для логирования)
+        Получение статистики работы инференса
 
         Returns:
-            Dict: Результаты предсказания
+            Dict: Статистика
         """
-        import tempfile
-        import os
-
-        # Сохранение во временный файл
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-            tmp_file.write(audio_bytes)
-            tmp_path = tmp_file.name
-
-        try:
-            result = self.predict(tmp_path)
-            return result
-        finally:
-            # Удаление временного файла
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-
-    def get_stats(self) -> Dict:
-        """Получение статистики работы инференса"""
         return {
             "total_inferences": self.total_inferences,
             "total_processing_time": self.total_processing_time,
@@ -271,8 +441,14 @@ class AudioInference:
                 if self.total_inferences > 0
                 else 0
             ),
-            "model_device": str(DEVICE),
+            "model_device": str(self.device),
+            "threshold": self.threshold,
         }
+
+    def reset_stats(self):
+        """Сброс статистики"""
+        self.total_inferences = 0
+        self.total_processing_time = 0.0
 
 
 def predict(model, audio_path: str) -> Tuple[str, float]:
@@ -284,10 +460,10 @@ def predict(model, audio_path: str) -> Tuple[str, float]:
         audio_path: Путь к аудиофайлу
 
     Returns:
-        Tuple[str, float]: (метка, вероятность)
+        Tuple[str, float]: (метка, уверенность)
     """
     inference = AudioInference(model)
-    result = inference.predict(audio_path, return_analysis=False, spectrogram_id=0)
+    result = inference.predict_from_file(audio_path, return_analysis=False)
 
     if "error" in result:
         raise ValueError(result["error"])
