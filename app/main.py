@@ -20,7 +20,7 @@ import asyncio
 import time
 from datetime import datetime
 from transformers import AutoModelForAudioClassification, AutoFeatureExtractor
-from .model import aasist3
+from .aasist3model import aasist3
 
 # Настройка логирования
 logging.basicConfig(

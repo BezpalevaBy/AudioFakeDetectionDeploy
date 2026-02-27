@@ -3,6 +3,7 @@ import torch
 import logging
 from typing import Dict, Any
 from transformers import AutoModelForAudioClassification
+from ..aasist3model import aasist3
 
 logger = logging.getLogger(__name__)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -10,8 +11,7 @@ logger.info(f"Using device: {DEVICE}")
 
 
 def load_model():
-    model_name = "garystafford/wav2vec2-deepfake-voice-detector"
-    model = AutoModelForAudioClassification.from_pretrained(model_name)
+    model = aasist3.from_pretrained("MTUCI/AASIST3")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
