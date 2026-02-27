@@ -65,10 +65,7 @@ def generate_report(
             "confidence_percent": confidence_percent,
             "confidence_level": confidence_level,
             "analysis": {
-                "artifacts": {
-                    "detected": detailed_artifacts,
-                    "confidence_level": artifacts.get("confidence_level", "LOW"),
-                },
+                "artifacts": {"detected": detailed_artifacts},
                 "audio_quality": {
                     "snr_db": audio_quality.get("snr_db", 0),
                     "dynamic_range_db": audio_quality.get("dynamic_range_db", 0),
