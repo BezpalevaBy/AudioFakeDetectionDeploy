@@ -156,22 +156,23 @@ class AudioInference:
             fake_probs = []
             quality_metrics_list = []
 
-            for i, chunk in enumerate(chunks):
-                self.logger.debug(f"Анализ качества чанка {i+1}/{len(chunks)}")
-                qm = AudioProcessor.analyze_audio_quality(chunk, sr)
-                quality_metrics_list.append(qm)
-
             # Инференс модели
             self.logger.info("Запуск инференса модели...")
             with torch.no_grad():
                 # Перемещаем аудио на нужное устройство
                 audio = audio.to(DEVICE)
+                model_out = self.model(audio)
 
-                # Получаем предсказание модели
-                output = self.model(audio)
-                probs = torch.softmax(output, dim=1)
+                if isinstance(model_out, torch.Tensor):
+                    logits = model_out
+                elif hasattr(model_out, "logits"):
+                    logits = model_out.logits
+                else:
+                    raise TypeError(f"Unsupported model output type: {type(model_out)}")
+
+                probs = torch.softmax(logits, dim=1)
                 prediction = torch.argmax(probs, dim=1)
-                probabilities = torch.softmax(output, dim=1)
+                probabilities = torch.softmax(logits, dim=1)
 
                 self.logger.info(
                     f"Результат модели: {'Bonafide' if prediction.item() == 0 else 'Spoof'}"
@@ -261,15 +262,6 @@ class AudioInference:
 
             return result
 
-        except torchaudio._backend.utils.NoBackendError as e:
-            self.logger.error(
-                f"Ошибка загрузки аудио (библиотека torchaudio): {str(e)}"
-            )
-            return {
-                "error": f"Не удалось загрузить аудиофайл. Убедитесь, что файл существует и имеет правильный формат. Ошибка: {str(e)}",
-                "processing_time": time.time() - start_time,
-                "timestamp": datetime.now().isoformat(),
-            }
         except FileNotFoundError as e:
             self.logger.error(f"Файл не найден: {str(e)}")
             return {
