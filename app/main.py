@@ -21,6 +21,9 @@ import time
 from datetime import datetime
 from transformers import AutoModelForAudioClassification, AutoFeatureExtractor
 import librosa
+from .model import spectra_0
+from pathlib import Path
+import torch
 
 # Настройка логирования
 logging.basicConfig(
@@ -32,10 +35,20 @@ logger = logging.getLogger(__name__)
 _model = None
 _metrics = None
 
-model_name = "garystafford/wav2vec2-deepfake-voice-detector"
-model = AutoModelForAudioClassification.from_pretrained(model_name)
-feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+MODEL_DIR = Path(__file__).parent
 
+print(f"Загружаем модель из: {MODEL_DIR}")
+print(f"Файл safetensors: {MODEL_DIR / 'model.safetensors'}")
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model = (
+    spectra_0.from_pretrained(pretrained_model_name_or_path=str(MODEL_DIR))
+    .eval()
+    .to(device)
+)
+
+print("Модель успешно загружена!")
 inference = AudioInference(model)
 
 
