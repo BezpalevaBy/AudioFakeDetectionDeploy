@@ -12,13 +12,13 @@ logger.info(f"Using device: {DEVICE}")
 
 
 def load_model():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     MODEL_DIR = Path(__file__).parent.parent
 
     print(f"Загружаем модель из: {MODEL_DIR}")
     print(f"Файл safetensors: {MODEL_DIR / 'model.safetensors'}")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = (
         spectra_0.from_pretrained(pretrained_model_name_or_path=str(MODEL_DIR))
         .eval()
