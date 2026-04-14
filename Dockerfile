@@ -1,21 +1,21 @@
-FROM python:3.10-slim
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
-COPY . /app
 WORKDIR /app
 
-# Копируем только requirements.txt сначала
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    ffmpeg \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 
-# Устанавливаем зависимости
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --upgrade pip && \
+    pip3 install --no-cache-dir -r requirements.txt
 
-# Устанавливаем PYTHONPATH
+COPY . .
+
 ENV PYTHONPATH=/app
 
-RUN ls -la && \
-    echo "=== app directory ===" && \
-    ls -la app/
-
-# Запускаем
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
