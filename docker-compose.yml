@@ -1,10 +1,22 @@
 version: "3.9"
+
 services:
   detector:
-    build: .
+    image: audiofakedetectiondeploy-detector:latest  # Замените на имя вашего существующего образа
+    # Например:
+    # image: app-detector:latest
+    # image: deepfake-app:2.0
+    # image: detector:latest
+    container_name: deepfake-detector
     ports:
       - "8000:8000"
-    volumes:
-      - ./app:/app/app  # Для разработки с hot-reload
     environment:
       - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    restart: unless-stopped
