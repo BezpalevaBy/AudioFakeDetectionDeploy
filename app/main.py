@@ -119,9 +119,14 @@ app.add_middleware(
 # API маршруты
 app.include_router(router, prefix="/api", tags=["API"])
 
-# Web интерфейс
-app.mount("/static", StaticFiles(directory="app/web/static"), name="static")
-templates = Jinja2Templates(directory="app/web/templates")
+BASE_DIR = Path(__file__).resolve().parent
+
+templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
+app.mount(
+    "/static",
+    StaticFiles(directory=str(BASE_DIR / "web" / "static")),
+    name="static",
+)
 
 
 @app.get("/")
